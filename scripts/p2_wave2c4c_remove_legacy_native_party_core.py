@@ -65,6 +65,7 @@ PREVIOUS = {BASE + p for p in (
     "navigation/Routes.kt", "core/deeplink/AppUrlBridge.kt",
 )}
 ALLOWED_GITLINKS = {"MPVKit", "libass-android", "vendor/TorrServer", "vendor/quickjs-kt"}
+EXPECTED_EXTERNAL_KOTLIN_JAVA_FILES = 1247  # 1262 pinned files - 1 old bridge - 14 native Party files
 LEGACY_SYMBOLS = re.compile(
     r"\b(?:PartyRepository|PartyRoute|PartyMedia|PartySync|PartyScreen|"
     r"PartyStream|PartySource|PartyEvent|PartyPanel|PartyPresence|"
@@ -96,7 +97,8 @@ def scan_external_sources(root: Path, excluded: set[str]) -> int:
     # Every tracked Kotlin/Java file in the public checkout, not just ComposeApp.
     sources = [p for p in git(root, "ls-files", "--", "*.kt", "*.java").splitlines()
                if p not in excluded and (root / p).is_file()]
-    require(len(sources) >= 1250, "unexpectedly small public Kotlin/Java source tree")
+    require(len(sources) == EXPECTED_EXTERNAL_KOTLIN_JAVA_FILES,
+            f"pinned public Kotlin/Java inventory drift: expected {EXPECTED_EXTERNAL_KOTLIN_JAVA_FILES}, found {len(sources)}")
     for rel in sources:
         p = checked_file(root, rel)
         body = p.read_text(encoding="utf-8")
@@ -171,6 +173,7 @@ def main() -> None:
     for rel, sha in preserved.items():
         require(git_hash(root, rel) == sha, "protected public file changed: " + rel)
     subprocess.check_call(["git", "-C", str(root), "diff", "--check"])
+    print("P2_WAVE2C4C_INVENTORY_GUARD_CORRECTED=PASS")
     print("P2_WAVE2C4C_NATIVE_PARTY_REMOVAL=PASS")
     print(f"P2_WAVE2C4C_NATIVE_PARTY_KOTLIN_FILES_DELETED={len(CORE_BLOBS)}")
     print(f"P2_WAVE2C4C_NATIVE_PARTY_TEST_FILES_DELETED={len(TEST_BLOBS)}")
