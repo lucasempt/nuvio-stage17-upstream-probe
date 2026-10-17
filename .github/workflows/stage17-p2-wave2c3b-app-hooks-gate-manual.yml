@@ -1,0 +1,223 @@
+# Stage17 P2 / Wave2C3b: detach orphan native Party MainApp hooks after approved Wave2C3a.
+# Removes unused Party media launch and notice collector; keeps public Party core and invite parser.
+name: Stage17 P2 - Detach Orphan Legacy Party App Hooks (MANUAL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Validar Wave2C3b APENAS no upstream publico temporario'
+        required: true
+        type: choice
+        options:
+          - NAO_EXECUTAR
+          - VALIDAR_P2_WAVE2C3B_HOOKS
+        default: NAO_EXECUTAR
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage17-p2-public-wave2c3b
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' && inputs.confirmacao == 'VALIDAR_P2_WAVE2C3B_HOOKS' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+      TARGET_SHA: 229c083cf3db7bab6fda284484f87439eb4e0eb0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout only this PUBLIC probe scripts (no private code)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Configure Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Clone frozen public upstream without submodule initialization
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/nuvio-stage17-p2-wave2c3b-source"
+          mkdir -p "$src"
+          git -C "$src" init
+          git -C "$src" remote add origin "$UPSTREAM_URL"
+          git -C "$src" -c protocol.version=2 fetch --depth=1 --no-tags origin "$TARGET_SHA"
+          git -C "$src" checkout --detach "$TARGET_SHA"
+          test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
+          echo "SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo 'UPSTREAM_SOURCE_PIN=PASS'
+
+      - name: Apply strict P2 wave1 source-only settings patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_disable_native_party_settings_v1.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE1_SETTINGS=APPLIED'
+
+      - name: Apply strict P2 Wave2A native Party stream and player toolbar patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2a_detach_party_source_player_button.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2A_SOURCE_AND_PLAYER_BUTTON=APPLIED'
+
+      - name: Apply strict P2 Wave2B1 native Party gestures patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b1_detach_native_party_gestures.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2B1_GESTURES=APPLIED'
+
+      - name: Apply strict P2 Wave2B2 native Party runtime effects patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b2_detach_native_party_playback_effects.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2B2_EFFECTS=APPLIED'
+
+      - name: Apply strict P2 Wave2B3 player UI and playback snapshot patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b3_detach_native_party_player_ui.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2B3_PLAYER_UI=APPLIED'
+
+      - name: Apply Wave2C1a normal playback helper, keeping native Party bridge
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c1a_preserve_normal_playback_position.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeGestureActions.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimePlaybackActions.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt"
+          echo 'P2_WAVE2C1A_PATCH_SCOPE=ONLY_TWO_ALREADY_MODIFIED_KOTLIN_FILES'
+
+      - name: Apply Wave2C1b remove legacy player Party bridge (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c1b_remove_native_party_runtime_bridge.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeState.kt
+          test ! -e "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt"
+          echo 'P2_WAVE2C1B_SCOPE=ONLY_LEGACY_PLAYER_PARTY_BRIDGE_AND_6_PLAYER_STATES'
+
+      - name: Apply Wave2C2 detach obsolete Party player callback plumbing (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c2_detach_party_player_callbacks.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/PlayerDestination.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreen.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenArgs.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyScreen.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/navigation/Routes.kt"
+          echo 'P2_WAVE2C2_SCOPE=ONLY_PUBLIC_PLAYER_CALLBACK_PLUMBING'
+
+      - name: Apply Wave2C3a detach legacy PartyRoute navigation (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c3a_detach_party_route_navigation.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/AppNavigationSupport.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/navigation/Routes.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyScreen.kt"
+          echo 'P2_WAVE2C3A_SCOPE=ONLY_LEGACY_PARTY_ROUTE_PUBLIC'
+
+      - name: Apply Wave2C3b remove orphan public Party app hooks (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c3b_detach_orphan_party_app_hooks.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyScreen.kt"
+          echo 'P2_WAVE2C3B_SCOPE=ONLY_ORPHAN_NATIVE_PARTY_MAIN_APP_HOOKS'
+
+      - name: Verify Android resources and memory
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,pathlib,shutil
+          items={}
+          for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+              if ':' in line:
+                  k,v=line.split(':',1)
+                  if v.strip().endswith('kB'): items[k]=int(v.strip().split()[0])
+          avail=items['MemAvailable']/1024**2
+          disk=shutil.disk_usage(os.environ['SOURCE_DIR']).free/1024**3
+          print(f'RAM_AVAILABLE_GIB={avail:.2f} DISK_FREE_GIB={disk:.2f}')
+          if avail < 8 or disk < 6.5: raise SystemExit('FAIL_CAPACITY_GATE')
+          sdk=os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          if not sdk or not pathlib.Path(sdk).is_dir(): raise SystemExit('FAIL_SDK_GATE')
+          PY
+
+      - name: Apply stable Gradle RAM parameters only inside temporary checkout
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'PY'
+          import os,re
+          from pathlib import Path
+          p=Path('gradle.properties')
+          s=p.read_text(encoding='utf-8')
+          updates={
+            'org.gradle.jvmargs':'-Xmx6144m -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768m',
+            'kotlin.compiler.execution.strategy':'in-process',
+            'org.gradle.workers.max':'1',
+            'org.gradle.parallel':'false',
+            'org.gradle.caching':'false',
+            'kotlin.native.ignoreDisabledTargets':'true',
+            'kotlin.native.enableKlibsCrossCompilation':'false',
+          }
+          for k,v in updates.items():
+            pat=r'^'+re.escape(k)+r'\s*=.*$'
+            if re.search(pat,s,flags=re.M):
+              s=re.sub(pat,lambda _:f'{k}={v}',s,count=1,flags=re.M)
+            else:
+              s+=f'\n{k}={v}'
+          p.write_text(s.rstrip()+'\n',encoding='utf-8')
+          sdk=os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          Path('local.properties').write_text(f'sdk.dir={sdk}\n',encoding='utf-8')
+          PY
+          chmod +x gradlew
+          echo 'GRADLE_SETTINGS=IN_PROCESS_ONE_WORKER'
+
+      - name: Compile public upstream cumulative Wave2C3b
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          ./gradlew :androidApp:assembleFullDebug --stacktrace --no-daemon --max-workers=1 --no-build-cache
+          echo 'P2_WAVE2C3B_PUBLIC_BUILD=SUCCESS'
+          find androidApp/build/outputs/apk -type f -name '*.apk' -exec sha256sum '{}' \;
+          find androidApp/build/outputs/apk -type f -name '*.apk' -delete
+          echo 'NO_APK_PUBLICATION=YES'
+          echo 'NATIVE_PARTY_FEATURE_MODULE_STILL_PRESENT=YES'
+          echo 'THIS_BUILD_IS_NOT_NUVIO_TOGETHER=YES'
+
+      - name: Cleanup any temporary public APK if build fails
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${SOURCE_DIR:-}" ] && [ -d "${SOURCE_DIR}/androidApp/build/outputs/apk" ]; then
+            find "${SOURCE_DIR}/androidApp/build/outputs/apk" -type f -name '*.apk' -delete
+          fi
+          echo 'P2_WAVE2C3B_TEMP_APK_CLEANUP=DONE'
+
+      - name: Security and scope audit
+        if: always()
+        run: |
+          echo 'NO_PRIVATE_TOGETHER_CODE=YES'
+          echo 'NO_GITHUB_ARTIFACT_UPLOAD=YES'
+          echo 'NO_GITHUB_CACHE_UPLOAD=YES'
+          echo 'STAGE16_FROZEN_AND_UNMODIFIED=YES'
