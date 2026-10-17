@@ -58,8 +58,12 @@ def main():
     root = args.source.resolve(strict=True)
     if git(root, "rev-parse", "HEAD") != PINNED:
         raise SystemExit("REFUSE: unexpected upstream SHA")
-    if git(root, "status", "--porcelain", "--untracked-files=no"):
-        raise SystemExit("REFUSE: upstream must have clean tracked worktree")
+    # Public upstream gitlinks can appear deleted when not initialized. Allow
+    # ONLY those four documented gitlink placeholders as pre-existing changes.
+    baseline = set(git(root, "diff", "--name-only").splitlines())
+    allowed_gitlinks = {"MPVKit", "libass-android", "vendor/TorrServer", "vendor/quickjs-kt"}
+    if not baseline.issubset(allowed_gitlinks):
+        raise SystemExit(f"REFUSE: unexpected initial dirty upstream: {sorted(baseline)}")
     staged = {}
     for rel, expected_blob in EXPECTED.items():
         path = root / BASE / rel
@@ -88,8 +92,8 @@ def main():
         print(f"P2_SETTINGS_FILE_MODIFIED={path.relative_to(root)}")
     actual_paths = set(git(root, "diff", "--name-only").splitlines())
     required_paths = {BASE + rel for rel in EXPECTED}
-    if actual_paths != required_paths:
-        raise SystemExit(f"UNEXPECTED_DIFF_PATHS={sorted(actual_paths.symmetric_difference(required_paths))}")
+    if actual_paths != baseline | required_paths:
+        raise SystemExit(f"UNEXPECTED_DIFF_PATHS={sorted(actual_paths.symmetric_difference(baseline | required_paths))}")
     subprocess.check_call(["git", "-C", str(root), "diff", "--check"])
     print("P2_WAVE1_SETTINGS_PATCH=PASS")
     print("NATIVE_WATCH_PARTY_OTHER_INTEGRATIONS=STILL_PRESENT")
