@@ -1,0 +1,149 @@
+# Nuvio Stage17 / P1: compile ONLY official PUBLIC upstream at FROZEN SHA.
+# Manually dispatch AFTER smoke test. NEVER upload built APK or add Together.
+# Do not use on the private meuprojeto; only isolated public probe repository.
+name: Stage17 P1 - Public Upstream Compile (MANUAL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Confirmar: apenas upstream publico, SEM Together/APK publicado'
+        required: true
+        type: choice
+        options:
+          - NAO_EXECUTAR
+          - COMPILAR_UPSTREAM_PUBLICO
+        default: NAO_EXECUTAR
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage17-public-upstream-manual
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+  OLD_SHA: a30bf5192c0aa56219c47dc964a9cbfd400d37a7
+  TARGET_SHA: 229c083cf3db7bab6fda284484f87439eb4e0eb0
+
+jobs:
+  upstream-only:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' && inputs.confirmacao == 'COMPILAR_UPSTREAM_PUBLICO' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Java 21 (no private checkout)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Checkout exact PUBLIC upstream commits into temporary directory
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/nuvio-stage17-upstream-public"
+          mkdir -p "$src"
+          git -C "$src" init
+          git -C "$src" remote add origin "$UPSTREAM_URL"
+          git -C "$src" -c protocol.version=2 fetch --no-tags --depth=1 origin "$TARGET_SHA"
+          git -C "$src" checkout --detach "$TARGET_SHA"
+          git -C "$src" -c protocol.version=2 fetch --no-tags --depth=1 origin "$OLD_SHA"
+          git -C "$src" submodule update --init --recursive --depth 1
+          test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$src" rev-parse "$OLD_SHA")" = "$OLD_SHA"
+          test -f "$src/gradlew"
+          test -f "$src/androidApp/build.gradle.kts"
+          echo "SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo "PINNED_NEW_SHA=$TARGET_SHA"
+          echo 'TOGETHER_PRIVATE_REPOSITORY_NOT_READ=YES'
+
+      - name: Inventory full source differences and native Party (expected in unmodified upstream)
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          echo "CHANGED_PATHS=$(git diff --name-only "$OLD_SHA" "$TARGET_SHA" | wc -l)"
+          echo "ADDED_PATHS=$(git diff --name-status "$OLD_SHA" "$TARGET_SHA" | awk '$1=="A" {n++} END {print n+0}')"
+          echo "MODIFIED_PATHS=$(git diff --name-status "$OLD_SHA" "$TARGET_SHA" | awk '$1=="M" {n++} END {print n+0}')"
+          echo "DELETED_PATHS=$(git diff --name-status "$OLD_SHA" "$TARGET_SHA" | awk '$1=="D" {n++} END {print n+0}')"
+          echo "CURRENT_KOTLIN_FILES=$(git ls-tree -r --name-only "$TARGET_SHA" | grep -c '\.kt$' || true)"
+          echo 'NATIVE_PARTY_AUDIT=EXPECTED_REFERENCES; NOT_REMOVED_IN_P1'
+          echo 'Native Party path candidates:'
+          git ls-tree -r --name-only "$TARGET_SHA" | grep -Ei '(^|/)(party|watchparty|watch-party)(/|[^/]*)' | head -60 || true
+          echo 'Representative official Party reference locations (max 70):'
+          rg -l -i --glob '*.kt' --glob '*.xml' --glob '*.kts' \
+            'watch[_-]?party|watch-party:|nuvio://party|nuvio\.tv/party|PartyRepository|PartyRoute|PartyStream|PlayerScreenRuntimeParty' \
+            composeApp androidApp | head -70 || true
+          echo 'SOURCE_AUDIT=PASS (inspection only)'
+
+      - name: Fail early if public runner has insufficient RAM disk or SDK
+        run: |
+          set -euo pipefail
+          free -h
+          df -h "$SOURCE_DIR"
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          lines=pathlib.Path('/proc/meminfo').read_text().splitlines()
+          data={x.split(':',1)[0]:int(x.split(':',1)[1].split()[0]) for x in lines if ': ' in x and x.endswith('kB')}
+          avail=data['MemAvailable']/1024**2
+          disk=shutil.disk_usage(os.environ['SOURCE_DIR']).free/1024**3
+          print(f'RAM_AVAILABLE_GIB={avail:.2f} DISK_FREE_GIB={disk:.2f}')
+          if avail < 8 or disk < 6.5:
+              raise SystemExit('INSUFFICIENT_RAM_OR_DISK_FOR_FIRST_SAFE_ATTEMPT')
+          sdk=os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          if not sdk or not pathlib.Path(sdk).is_dir():
+              raise SystemExit('ANDROID_SDK_UNAVAILABLE')
+          PY
+
+      - name: Apply memory limits ONLY to temporary public upstream checkout
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re
+          p=Path('gradle.properties')
+          s=p.read_text(encoding='utf-8') if p.exists() else ''
+          updates={
+            'org.gradle.jvmargs':'-Xmx6144m -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768m',
+            'kotlin.compiler.execution.strategy':'in-process',
+            'org.gradle.workers.max':'1',
+            'org.gradle.parallel':'false',
+            'org.gradle.caching':'false',
+            'kotlin.native.ignoreDisabledTargets':'true',
+            'kotlin.native.enableKlibsCrossCompilation':'false',
+          }
+          for k,v in updates.items():
+            pat=r'^'+re.escape(k)+r'\s*=.*$'
+            if re.search(pat,s,flags=re.M):
+              s=re.sub(pat,lambda _:f'{k}={v}',s,count=1,flags=re.M)
+            else:
+              s+=f'\n{k}={v}'
+          p.write_text(s.rstrip()+'\n',encoding='utf-8')
+          sdk=os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          Path('local.properties').write_text(f'sdk.dir={sdk}\n',encoding='utf-8')
+          PY
+          chmod +x gradlew
+          echo 'KOTLIN_COMPILER=in-process GRADLE_MAX_WORKERS=1'
+
+      - name: Build original public Nuvio Android Full Debug - no Together
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          ./gradlew :androidApp:assembleFullDebug --stacktrace --no-daemon --max-workers=1 --no-build-cache
+          echo 'UPSTREAM_FULL_DEBUG_BUILD=SUCCESS'
+          # Do not publish APK. SHA only, then remove binaries from runner.
+          find androidApp/build/outputs/apk -type f -name '*.apk' -exec sha256sum '{}' \;
+          find androidApp/build/outputs/apk -type f -name '*.apk' -delete
+          echo 'APK_NOT_PUBLISHED=YES RAW_UPSTREAM_NOT_TOGETHER=YES'
+
+      - name: Finish with log-only diagnostics
+        if: always()
+        run: |
+          echo 'NEVER_DISTRIBUTE_OR_INSTALL_RAW_UPSTREAM_AS_NUVIO_TOGETHER'
+          echo 'GITHUB_ARTIFACT_UPLOAD=DISABLED'
+          echo 'GITHUB_CACHE_UPLOAD=DISABLED'
+          echo 'STAGE16_GATEFIX2_NOT_MODIFIED=YES'
