@@ -132,7 +132,7 @@ def patch_actions(s):
 """)
     for forbidden in ("onPartyClick", "partyActive", "Res.string.party_title", "Icons.Rounded.Groups"):
         if forbidden in s: raise SystemExit("REFUSE: toolbar still uses native Party: " + forbidden)
-    if "internal fun PlayerToolbar(" not in s or "onLockToggle = onLockToggle" not in s:
+    if "internal fun PlayerToolbar(" not in s or "onClick = onLockToggle" not in s or "onClick = onBack" not in s:
         raise SystemExit("REFUSE: normal player toolbar controls lost")
     return s
 
