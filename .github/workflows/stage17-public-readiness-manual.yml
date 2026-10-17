@@ -1,0 +1,50 @@
+# Nuvio Stage17 / P1: manual check on a SEPARATE public probe repository.
+# NO push trigger, NO private repo checkout, NO paid/larger runner, NO artifacts.
+name: Stage17 P1 - Public Ubuntu Readiness (MANUAL)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-readiness:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Inspect hosted runner without downloading source or building
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'NUVIO_STAGE17_PUBLIC_READINESS=START'
+          echo "REPOSITORY=${GITHUB_REPOSITORY}"
+          echo "REF=${GITHUB_REF_NAME}"
+          echo "RUNNER_OS=${RUNNER_OS}"
+          echo "RUNNER_NAME=${RUNNER_NAME}"
+          uname -a
+          free -h
+          df -h .
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$sdk" && test -d "$sdk"
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          items={}
+          for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+              if ':' in line:
+                  k,v=line.split(':',1)
+                  if v.strip().endswith('kB'):
+                      items[k]=int(v.strip().split()[0])
+          total=items['MemTotal']/1024**2
+          avail=items['MemAvailable']/1024**2
+          disk=shutil.disk_usage(os.getcwd()).free/1024**3
+          print(f'RAM_TOTAL_GIB={total:.2f}')
+          print(f'RAM_AVAILABLE_GIB={avail:.2f}')
+          print(f'DISK_AVAILABLE_GIB={disk:.2f}')
+          print('RUNNER_CAPACITY_NOTE=This is readiness only, not proof of Gradle success')
+          PY
+          echo 'NO_PRIVATE_CODE=YES NO_BUILD=YES NO_ARTIFACT=YES'
+          echo 'NUVIO_STAGE17_PUBLIC_READINESS=PASS'
