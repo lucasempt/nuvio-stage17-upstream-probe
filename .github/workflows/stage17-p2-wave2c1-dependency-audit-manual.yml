@@ -1,0 +1,190 @@
+# Stage17 P2 / Wave2C1: read-only dependency audit after cumulative approved public patches.
+# Does not delete source, perform build, publish APK, or access private Together code.
+name: Stage17 P2 - Party Runtime Dependency Audit (MANUAL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Confirmar patch APENAS em copia publica temporaria do Nuvio'
+        required: true
+        type: choice
+        options:
+          - NAO_EXECUTAR
+          - AUDITAR_P2_WAVE2C1_DEPENDENCIAS
+        default: NAO_EXECUTAR
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage17-p2-public-wave2c1-audit
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' && inputs.confirmacao == 'AUDITAR_P2_WAVE2C1_DEPENDENCIAS' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+      TARGET_SHA: 229c083cf3db7bab6fda284484f87439eb4e0eb0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout only this PUBLIC probe scripts (no private code)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Clone frozen public upstream without submodule initialization
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/nuvio-stage17-p2-settings-source"
+          mkdir -p "$src"
+          git -C "$src" init
+          git -C "$src" remote add origin "$UPSTREAM_URL"
+          git -C "$src" -c protocol.version=2 fetch --depth=1 --no-tags origin "$TARGET_SHA"
+          git -C "$src" checkout --detach "$TARGET_SHA"
+          test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
+          echo "SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo 'UPSTREAM_SOURCE_PIN=PASS'
+
+      - name: Apply strict P2 wave1 source-only settings patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_disable_native_party_settings_v1.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/SettingsDestinations.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/AppShellComponents.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/SettingsScreen.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/SettingsRootPage.kt
+          echo 'P2_PATCH_SCOPE=SETTINGS_ENTRIES_ONLY'
+
+      - name: Apply strict P2 Wave2A native Party stream and player toolbar patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2a_detach_party_source_player_button.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/StreamDestination.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeUi.kt
+          echo 'P2_PATCH_SCOPE=WAVE1_SETTINGS_PLUS_WAVE2A_STREAM_AND_PLAYER_TOOLBAR'
+
+      - name: Apply strict P2 Wave2B1 native Party gestures patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b1_detach_native_party_gestures.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeGestureActions.kt
+          echo 'P2_PATCH_SCOPE=WAVE1_PLUS_WAVE2A_PLUS_WAVE2B1_GESTURES'
+
+      - name: Apply strict P2 Wave2B2 native Party runtime effects patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b2_detach_native_party_playback_effects.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeEffects.kt
+          echo 'P2_PATCH_SCOPE=WAVE1_PLUS_WAVE2A_PLUS_WAVE2B1_PLUS_WAVE2B2_EFFECTS'
+
+      - name: Apply strict P2 Wave2B3 player UI and playback snapshot patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b3_detach_native_party_player_ui.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeUi.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerControls.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerControlActions.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimePlaybackActions.kt
+          echo 'P2_PATCH_SCOPE=WAVES_1_2A_2B1_2B2_2B3_PUBLIC_ONLY'
+
+      - name: Inventory Party runtime dependencies after all approved public source patches
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+
+          root = pathlib.Path(os.environ["SOURCE_DIR"])
+          player = pathlib.Path("composeApp/src/commonMain/kotlin/com/nuvio/app/features/player")
+          bridge_rel = player / "PlayerScreenRuntimeParty.kt"
+          state_rel = player / "PlayerScreenRuntimeState.kt"
+          playback_rel = player / "PlayerScreenRuntimePlaybackActions.kt"
+          gestures_rel = player / "PlayerScreenRuntimeGestureActions.kt"
+          bridge = (root / bridge_rel).read_text(encoding="utf-8")
+          state = (root / state_rel).read_text(encoding="utf-8")
+          playback = (root / playback_rel).read_text(encoding="utf-8")
+          gestures = (root / gestures_rel).read_text(encoding="utf-8")
+
+          helper = """internal fun PlayerScreenRuntime.currentPlaybackPositionMs(): Long {
+              val snapshot = playbackSnapshot
+              if (!snapshot.isPlaying || snapshot.isLoading) return snapshot.positionMs
+              val elapsedMs = playbackSnapshotMark?.elapsedNow()?.inWholeMilliseconds?.coerceIn(0L, 1_000L) ?: 0L
+              return snapshot.positionMs + (elapsedMs * snapshot.playbackSpeed).toLong()
+          }
+          """
+          if bridge.count(helper) != 1:
+              raise SystemExit("FAIL_P2_HELPER_SOURCE_NOT_EXACTLY_ONE")
+          if "fun PlayerScreenRuntime.currentPlaybackPositionMs()" in playback:
+              raise SystemExit("FAIL_P2_HELPER_ALREADY_IN_PLAYBACK")
+          if "currentPlaybackPositionMs()" not in gestures:
+              raise SystemExit("FAIL_P2_NORMAL_GESTURE_HELPER_CALL_MISSING")
+          required_fields = [
+              "showPartyPanel", "partyBehind", "partyBehindMs",
+              "partyRateNudge", "partyPreviousKey", "partyAppInBackground"
+          ]
+          for field in required_fields:
+              if len(re.findall(r"\b" + re.escape(field) + r"\b", state)) != 1:
+                  raise SystemExit("FAIL_P2_UNEXPECTED_PARTY_STATE_FIELD: " + field)
+
+          native_runtime = [
+              "isPartySynced", "isPartyControlLocked", "partyBlocksControl",
+              "toggleOwnPlayback", "ownSeekTarget", "currentPartyMedia",
+              "currentPartyStream", "partyBaseRate", "publishPartyPlayback",
+              "startParty", "BindPartyEffects", "RenderParty",
+              "clearPartyNudge", "applyPartyPaused", "handlePartyMediaChange"
+          ]
+          data = subprocess.check_output(
+              ["git", "-C", str(root), "ls-files", "-z", "*.kt"]
+          ).split(b"\0")
+          seen = 0
+          external = {}
+          for raw in data:
+              if not raw:
+                  continue
+              rel = pathlib.Path(os.fsdecode(raw))
+              file = root / rel
+              if not file.is_file():
+                  continue
+              seen += 1
+              if rel == bridge_rel:
+                  continue
+              txt = file.read_text(encoding="utf-8", errors="replace")
+              hits = []
+              for symbol in native_runtime:
+                  if re.search(r"\b" + re.escape(symbol) + r"\b", txt):
+                      hits.append(symbol)
+              for symbol in required_fields:
+                  if rel != state_rel and re.search(r"\b" + re.escape(symbol) + r"\b", txt):
+                      hits.append(symbol)
+              if hits:
+                  external[rel.as_posix()] = hits
+          print("P2_WAVE2C1_KOTLIN_FILES_SCANNED=" + str(seen))
+          print("P2_WAVE2C1_HELPER_DEFINITION=BRIDGE_ONLY")
+          print("P2_WAVE2C1_HELPER_NORMAL_GESTURE_CALL=PRESENT")
+          print("P2_WAVE2C1_EXCLUSIVE_PARTY_STATES=6")
+          print("P2_WAVE2C1_EXTERNAL_NATIVE_RUNTIME_REFERENCES=" + str(len(external)))
+          for rel, hits in sorted(external.items()):
+              print("P2_WAVE2C1_BLOCKER|" + rel + "|" + ",".join(hits))
+          if external:
+              raise SystemExit("STAGE17_P2_WAVE2C1_DEPENDENCY_AUDIT=BLOCKED")
+          print("STAGE17_P2_WAVE2C1_DEPENDENCY_AUDIT=PASS")
+          print("NATIVE_PARTY_BRIDGE_STILL_PRESENT=YES")
+          print("NO_PARTY_FILES_DELETED=YES")
+          print("NO_APK_BUILT_OR_PUBLISHED=YES")
+          print("NO_PRIVATE_TOGETHER_CODE=YES")
+          PY
