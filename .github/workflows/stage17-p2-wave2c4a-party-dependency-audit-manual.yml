@@ -1,0 +1,166 @@
+# Stage17 P2 / Wave2C4a: final PUBLIC native Party dependency inventory after approved Wave2C3b.
+# Read-only after applying cumulative public patches; NO APK compilation or artifacts.
+name: Stage17 P2 - Native Party Removal Preflight Audit (MANUAL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Auditar Wave2C4a APENAS upstream publico temporario'
+        required: true
+        type: choice
+        options:
+          - NAO_EXECUTAR
+          - VALIDAR_P2_WAVE2C4A_AUDIT
+        default: NAO_EXECUTAR
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage17-p2-public-wave2c4a
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' && inputs.confirmacao == 'VALIDAR_P2_WAVE2C4A_AUDIT' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+      TARGET_SHA: 229c083cf3db7bab6fda284484f87439eb4e0eb0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout only this PUBLIC probe scripts (no private code)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Configure Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Clone frozen public upstream without submodule initialization
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/nuvio-stage17-p2-wave2c4a-source"
+          mkdir -p "$src"
+          git -C "$src" init
+          git -C "$src" remote add origin "$UPSTREAM_URL"
+          git -C "$src" -c protocol.version=2 fetch --depth=1 --no-tags origin "$TARGET_SHA"
+          git -C "$src" checkout --detach "$TARGET_SHA"
+          test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
+          echo "SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo 'UPSTREAM_SOURCE_PIN=PASS'
+
+      - name: Apply strict P2 wave1 source-only settings patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_disable_native_party_settings_v1.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE1_SETTINGS=APPLIED'
+
+      - name: Apply strict P2 Wave2A native Party stream and player toolbar patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2a_detach_party_source_player_button.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2A_SOURCE_AND_PLAYER_BUTTON=APPLIED'
+
+      - name: Apply strict P2 Wave2B1 native Party gestures patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b1_detach_native_party_gestures.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2B1_GESTURES=APPLIED'
+
+      - name: Apply strict P2 Wave2B2 native Party runtime effects patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b2_detach_native_party_playback_effects.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2B2_EFFECTS=APPLIED'
+
+      - name: Apply strict P2 Wave2B3 player UI and playback snapshot patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2b3_detach_native_party_player_ui.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2B3_PLAYER_UI=APPLIED'
+
+      - name: Apply Wave2C1a normal playback helper, keeping native Party bridge
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c1a_preserve_normal_playback_position.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeGestureActions.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimePlaybackActions.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt"
+          echo 'P2_WAVE2C1A_PATCH_SCOPE=ONLY_TWO_ALREADY_MODIFIED_KOTLIN_FILES'
+
+      - name: Apply Wave2C1b remove legacy player Party bridge (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c1b_remove_native_party_runtime_bridge.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeState.kt
+          test ! -e "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt"
+          echo 'P2_WAVE2C1B_SCOPE=ONLY_LEGACY_PLAYER_PARTY_BRIDGE_AND_6_PLAYER_STATES'
+
+      - name: Apply Wave2C2 detach obsolete Party player callback plumbing (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c2_detach_party_player_callbacks.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/PlayerDestination.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreen.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenArgs.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyScreen.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/navigation/Routes.kt"
+          echo 'P2_WAVE2C2_SCOPE=ONLY_PUBLIC_PLAYER_CALLBACK_PLUMBING'
+
+      - name: Apply Wave2C3a detach legacy PartyRoute navigation (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c3a_detach_party_route_navigation.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/AppNavigationSupport.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/navigation/Routes.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyScreen.kt"
+          echo 'P2_WAVE2C3A_SCOPE=ONLY_LEGACY_PARTY_ROUTE_PUBLIC'
+
+      - name: Apply Wave2C3b remove orphan public Party app hooks (PUBLIC ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c3b_detach_orphan_party_app_hooks.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt"
+          test -f "$SOURCE_DIR/composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyScreen.kt"
+          echo 'P2_WAVE2C3B_SCOPE=ONLY_ORPHAN_NATIVE_PARTY_MAIN_APP_HOOKS'
+
+      - name: Audit native Party dependencies after all approved public patches (READ ONLY)
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_wave2c4a_final_native_party_dependency_audit.py --source "$SOURCE_DIR"
+          echo 'P2_WAVE2C4A_AUDIT_FINISHED=YES'
+
+      - name: Final public source scope audit (READ ONLY)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${SOURCE_DIR:-}" ] && [ -d "${SOURCE_DIR}/.git" ]; then
+            echo 'P2_WAVE2C4A_FINAL_GIT_STATUS_START'
+            git -C "$SOURCE_DIR" status --short --untracked-files=normal
+            echo 'P2_WAVE2C4A_FINAL_GIT_STATUS_END'
+          fi
+          echo 'NO_PRIVATE_REPOSITORY_CHECKOUT=YES'
+          echo 'NO_GITHUB_ARTIFACT_UPLOAD=YES'
+          echo 'NO_GITHUB_CACHE_UPLOAD=YES'
+          echo 'NO_APK_COMPILATION=YES'
+          echo 'STAGE16_PRIVATE_UNTOUCHED_BY_THIS_WORKFLOW=YES'
