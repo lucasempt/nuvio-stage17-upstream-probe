@@ -1,0 +1,109 @@
+# Stage17 P2: read-only inventory of the pinned PUBLIC Nuvio upstream.
+# NEVER includes Together code, APK upload, artifact, or a write to meuprojeto.
+name: Stage17 P2 - Native Party Inventory (MANUAL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Inspecionar somente codigo publico do Nuvio (sem compilar ou modificar)'
+        required: true
+        type: choice
+        options:
+          - NAO_EXECUTAR
+          - AUDITAR_UPSTREAM_PUBLICO
+        default: NAO_EXECUTAR
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' && inputs.confirmacao == 'AUDITAR_UPSTREAM_PUBLICO' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+      TARGET_SHA: 229c083cf3db7bab6fda284484f87439eb4e0eb0
+    steps:
+      - name: Checkout exact PUBLIC upstream (no submodule initialization)
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/nuvio-stage17-p2-upstream"
+          git init "$src"
+          git -C "$src" remote add origin "$UPSTREAM_URL"
+          git -C "$src" -c protocol.version=2 fetch --depth 1 --no-tags origin "$TARGET_SHA"
+          git -C "$src" checkout --detach "$TARGET_SHA"
+          test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
+          echo "SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo "PINNED_UPSTREAM_SHA=$TARGET_SHA"
+
+      - name: Inventory all tracked Android and Compose Party reference files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, re, subprocess, collections
+          root=pathlib.Path(os.environ['SOURCE_DIR'])
+          sha=os.environ['TARGET_SHA']
+          assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()==sha
+          tracked=subprocess.check_output(['git','-C',str(root),'ls-files','-z']).decode().split('\0')
+          suffixes=('.kt','.kts','.xml','.json','.toml','.properties','.java','.plist')
+          patterns={
+             'native_package':r'com\.nuvio\.app\.features\.party(?:\.|\b)',
+             'native_symbol':r'\b(?:PartyRepository|PartyRoute|PartyScreen|PartyPanel|PartyApi|PartyChannel|PartyClock|PartySync|PartyStream|PartyMedia|PartyEvent|PartyCorrection|RenderParty|BindPartyEffects)\b',
+             'player_hook':r'\b(?:isPartySynced|isPartyControlLocked|partyBlocksControl|publishPartyPlayback|showPartyPanel|partyBehind|partyRateNudge|onOpenPartyMedia|onWatchPartyClick|onWatchPartySettingsClick|openPartyMedia|partyMediaKey)\b',
+             'network':r'watch_party_|watch-party:|\bwatchParty\b',
+             'link':r'nuvio\.tv/party|nuvio://party|/party/|AppDeepLink\.Party',
+             'resources':r'\bparty_[a-z_]+\b|strings_party\.xml',
+             'misc':r'(?i)\bwatch[-_ ]?party\b|\bparty\b'
+          }
+          compiled={name:re.compile(p) for name,p in patterns.items()}
+          findings=collections.defaultdict(lambda:collections.defaultdict(list))
+          scanned=0
+          for rel in tracked:
+             if not rel or not rel.endswith(suffixes):
+                continue
+             fp=root/rel
+             if not fp.is_file() or fp.is_symlink():
+                continue
+             scanned+=1
+             try:
+                lines=fp.read_text(encoding='utf-8').splitlines()
+             except UnicodeError:
+                continue
+             for lineno,line in enumerate(lines,1):
+                for name,regex in compiled.items():
+                   if regex.search(line):
+                      findings[rel][name].append(lineno)
+          native=[x for x in findings if '/features/party/' in x]
+          external=[x for x in findings if x not in native]
+          print('STAGE17_P2_SOURCE_AUDIT=BEGIN')
+          print(f'PINNED_SOURCE={sha}')
+          print(f'SCANNED_FILES={scanned}')
+          print(f'REFERENCE_FILES_TOTAL={len(findings)}')
+          print(f'NATIVE_PARTY_TREE_FILES={len(native)}')
+          print(f'CROSS_REFERENCE_FILES={len(external)}')
+          for rel in sorted(findings):
+             cats=findings[rel]
+             summary=','.join(f'{name}:{len(nums)}' for name,nums in sorted(cats.items()))
+             nums=sorted(set(n for rows in cats.values() for n in rows))
+             positions=','.join(map(str,nums[:60]))
+             if len(nums)>60:
+                positions+=f',+{len(nums)-60}'
+             print(f'P2_FILE|{rel}|{summary}|lines={positions}')
+          required=[
+             'composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt',
+             'composeApp/src/commonMain/kotlin/com/nuvio/app/StreamDestination.kt',
+             'composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt',
+             'composeApp/src/commonMain/kotlin/com/nuvio/app/core/deeplink/AppUrlBridge.kt',
+             'androidApp/src/main/AndroidManifest.xml'
+          ]
+          missing=[x for x in required if x not in findings]
+          if missing: raise SystemExit('AUDIT_FAILED_MISSING_EXPECTED_PATHS='+','.join(missing))
+          print('NEVER_SHARE_RAW_STREAM_URL=YES')
+          print('NO_TOGETHER_PRIVATE_CODE=YES')
+          print('NO_SOURCE_CHANGES=YES NO_APK=YES NO_ARTIFACT=YES')
+          print('STAGE17_P2_SOURCE_AUDIT=PASS')
+          PY
