@@ -1,0 +1,140 @@
+# Stage17 P2 / Wave1: public upstream ONLY. Removes settings entry, then rebuilds.
+# This does NOT remove the complete native Party or integrate Together.
+name: Stage17 P2 - Remove Native Party Settings Entry (MANUAL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Confirmar patch APENAS em copia publica temporaria do Nuvio'
+        required: true
+        type: choice
+        options:
+          - NAO_EXECUTAR
+          - VALIDAR_P2_CONFIGURACOES
+        default: NAO_EXECUTAR
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage17-p2-public-settings-wave1
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    if: ${{ github.repository == 'lucasempt/nuvio-stage17-upstream-probe' && github.ref_name == 'main' && inputs.confirmacao == 'VALIDAR_P2_CONFIGURACOES' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+      TARGET_SHA: 229c083cf3db7bab6fda284484f87439eb4e0eb0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout only this PUBLIC probe scripts (no private code)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Configure Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Clone frozen public upstream without submodule initialization
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/nuvio-stage17-p2-settings-source"
+          mkdir -p "$src"
+          git -C "$src" init
+          git -C "$src" remote add origin "$UPSTREAM_URL"
+          git -C "$src" -c protocol.version=2 fetch --depth=1 --no-tags origin "$TARGET_SHA"
+          git -C "$src" checkout --detach "$TARGET_SHA"
+          test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
+          echo "SOURCE_DIR=$src" >> "$GITHUB_ENV"
+          echo 'UPSTREAM_SOURCE_PIN=PASS'
+
+      - name: Apply strict P2 wave1 source-only settings patch
+        run: |
+          set -euo pipefail
+          python3 scripts/p2_disable_native_party_settings_v1.py --source "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" diff --stat -- \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/SettingsDestinations.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/AppShellComponents.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/MainAppContent.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/SettingsScreen.kt \
+            composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/SettingsRootPage.kt
+          echo 'P2_PATCH_SCOPE=SETTINGS_ENTRIES_ONLY'
+
+      - name: Verify Android resources and memory
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,pathlib,shutil
+          items={}
+          for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+              if ':' in line:
+                  k,v=line.split(':',1)
+                  if v.strip().endswith('kB'): items[k]=int(v.strip().split()[0])
+          avail=items['MemAvailable']/1024**2
+          disk=shutil.disk_usage(os.environ['SOURCE_DIR']).free/1024**3
+          print(f'RAM_AVAILABLE_GIB={avail:.2f} DISK_FREE_GIB={disk:.2f}')
+          if avail < 8 or disk < 6.5: raise SystemExit('FAIL_CAPACITY_GATE')
+          sdk=os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          if not sdk or not pathlib.Path(sdk).is_dir(): raise SystemExit('FAIL_SDK_GATE')
+          PY
+
+      - name: Apply stable Gradle RAM parameters only inside temporary checkout
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'PY'
+          import os,re
+          from pathlib import Path
+          p=Path('gradle.properties')
+          s=p.read_text(encoding='utf-8')
+          updates={
+            'org.gradle.jvmargs':'-Xmx6144m -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768m',
+            'kotlin.compiler.execution.strategy':'in-process',
+            'org.gradle.workers.max':'1',
+            'org.gradle.parallel':'false',
+            'org.gradle.caching':'false',
+            'kotlin.native.ignoreDisabledTargets':'true',
+            'kotlin.native.enableKlibsCrossCompilation':'false',
+          }
+          for k,v in updates.items():
+            pat=r'^'+re.escape(k)+r'\s*=.*$'
+            if re.search(pat,s,flags=re.M):
+              s=re.sub(pat,lambda _:f'{k}={v}',s,count=1,flags=re.M)
+            else:
+              s+=f'\n{k}={v}'
+          p.write_text(s.rstrip()+'\n',encoding='utf-8')
+          sdk=os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+          Path('local.properties').write_text(f'sdk.dir={sdk}\n',encoding='utf-8')
+          PY
+          chmod +x gradlew
+          echo 'GRADLE_SETTINGS=IN_PROCESS_ONE_WORKER'
+
+      - name: Compile public upstream P2 wave1 settings-only variant
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          ./gradlew :androidApp:assembleFullDebug --stacktrace --no-daemon --max-workers=1 --no-build-cache
+          echo 'P2_WAVE1_PUBLIC_SETTINGS_BUILD=SUCCESS'
+          find androidApp/build/outputs/apk -type f -name '*.apk' -exec sha256sum '{}' \;
+          find androidApp/build/outputs/apk -type f -name '*.apk' -delete
+          echo 'NO_APK_PUBLICATION=YES'
+          echo 'NATIVE_WATCH_PARTY_STILL_PRESENT=YES'
+          echo 'THIS_BUILD_IS_NOT_NUVIO_TOGETHER=YES'
+
+      - name: Security and scope audit
+        if: always()
+        run: |
+          echo 'NO_PRIVATE_TOGETHER_CODE=YES'
+          echo 'NO_GITHUB_ARTIFACT_UPLOAD=YES'
+          echo 'NO_GITHUB_CACHE_UPLOAD=YES'
+          echo 'STAGE16_FROZEN_AND_UNMODIFIED=YES'
