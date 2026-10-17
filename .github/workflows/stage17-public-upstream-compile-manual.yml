@@ -52,7 +52,15 @@ jobs:
           git -C "$src" -c protocol.version=2 fetch --no-tags --depth=1 origin "$TARGET_SHA"
           git -C "$src" checkout --detach "$TARGET_SHA"
           git -C "$src" -c protocol.version=2 fetch --no-tags --depth=1 origin "$OLD_SHA"
-          git -C "$src" submodule update --init --recursive --depth 1
+          # P1 Android only. Upstream gitlinks include libass-android and vendor/
+          # paths without URLs in .gitmodules. Recursive init would fail before Gradle.
+          # Keep upstream gitlinks unaltered; record their frozen SHA identities.
+          echo 'UPSTREAM_GITLINKS_BEGIN'
+          git -C "$src" ls-tree -r "$TARGET_SHA" | awk '$1=="160000" {print $4 " " $3}'
+          echo 'UPSTREAM_GITLINKS_END'
+          test -f "$src/.gitmodules"
+          test "$(git -C "$src" ls-tree "$TARGET_SHA" MPVKit | awk '{print $1}')" = '160000'
+          echo 'SUBMODULES_UNINITIALIZED_IN_ANDROID_PROBE=YES'
           test "$(git -C "$src" rev-parse HEAD)" = "$TARGET_SHA"
           test "$(git -C "$src" rev-parse "$OLD_SHA")" = "$OLD_SHA"
           test -f "$src/gradlew"
